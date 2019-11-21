@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
+"""
+@author: hannahannuniemi
+"""
 
-import os
 import time
-import copy
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error
 from datetime import timedelta
-import seaborn as sns
 import matplotlib.pyplot as plt
-# %matplotlib inline
 
 import torch
 import torch.nn as nn
@@ -41,9 +40,9 @@ print(df['PM10 concentration (ug/m3)'].min())
 print(df['PM10 concentration (ug/m3)'].max())
 
 # check missing values
-# put the time as index
 print("Missing values:\n")
 print(df.isnull().sum(), "\n")
+# put the time as index
 df = df.set_index('Year_Month_Day_Time')
 
 # use linear interpolation for filling the missing values
@@ -51,7 +50,7 @@ df_fill = df.interpolate()
 print(df_fill.isnull().sum(), "\n")
 print(df_fill.shape[0])
 
-# plot input data
+# plot PM10 concentration and amount of rain
 plt.rcParams['figure.figsize']=(18,8)
 fig1, ax1 = plt.subplots()
 ax2 = ax1.twinx() 
@@ -66,7 +65,7 @@ ax1.legend(loc='upper left')
 ax2.legend(loc='upper right')
 ax2.set_title('PM10 concentration and amount of rain')
 
-# plot input data
+# plot PM10 concentration and temperature
 plt.rcParams['figure.figsize']=(18,8)
 fig2, ax1 = plt.subplots()
 ax2 = ax1.twinx() 
@@ -82,7 +81,7 @@ ax2.legend(loc='upper right')
 ax2.set_title('PM10 concentration and temperature')
 fig2.savefig('temp_plot.png')
 
-# plot input data
+# PM10 concentration and wind speed
 plt.rcParams['figure.figsize']=(18,8)
 fig2, ax1 = plt.subplots()
 ax2 = ax1.twinx() 
@@ -110,7 +109,7 @@ ax3.set_xlabel('Temperature (degC)')
 ax4.set_xlabel('Wind speed (m/s)')
 fig3.savefig('hist.png')
 
-# chech data types
+# check data types
 df_fill.dtypes
 
 # function to split dataset to training and test sets
@@ -153,8 +152,8 @@ def split_equal_sequences(data, n_input, n_out, scaling=False):
       
       X.append(x_input)
       y.append(y_input)
-		# move along one time step
-    in_start += n_input
+		# move along to create next batch
+    in_start += 1
   return np.array(X), np.array(y)
 
 # Length of input data (hours of history data) and lenght of prediction period
@@ -178,17 +177,18 @@ dataset = torch.utils.data.TensorDataset(x, y)
 
 # divide the training dataset further to training and validation datasets.
 idx = list(range(len(dataset)))
-train_idx = idx[:30]
-val_idx = idx[30:]
+train_idx = idx[:15000]
+val_idx = idx[15000:]
 dataset_train = torch.utils.data.Subset(dataset, train_idx)
 dataset_valid = torch.utils.data.Subset(dataset, val_idx)
 print(len(dataset_train))
 print(len(dataset_valid))
 
 # load training and validation datasets to torch Dataloader format
-trainloader = torch.utils.data.DataLoader(dataset_train, batch_size=5, shuffle=False, pin_memory=False)
-validloader = torch.utils.data.DataLoader(dataset_valid, batch_size=1, shuffle=False, pin_memory=False)
+trainloader = torch.utils.data.DataLoader(dataset_train, batch_size=15, shuffle=True, pin_memory=False)
+validloader = torch.utils.data.DataLoader(dataset_valid, batch_size=5, shuffle=True, pin_memory=False)
 
+# build the model
 class ConvBlock(nn.Module):
     def __init__(self, hidden_size, kernel_size, dilation_rate, bias=False):
         super(ConvBlock, self).__init__()
@@ -273,8 +273,10 @@ model.to(device)
 
 # using mean absolute error as a criterion
 criterion = nn.L1Loss()
-# using L2 regularization
+# using Adam and L2 regularization
 optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.001)
+# learning rate scheduler
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
 
 # Feed a batch of data from the training data to test the network
 with torch.no_grad():
@@ -288,14 +290,12 @@ with torch.no_grad():
 
 # train model and monitor training and validation error
 # function modified from Pytorch tutorial: https://pytorch.org/tutorials/beginner/finetuning_torchvision_models_tutorial.html#model-training-and-validation-code
-def train_model(model, dataloaders, criterion, optimizer, num_epochs, is_inception=False):
+def train_model(model, dataloaders, criterion, optimizer, num_epochs):
     since = time.time()
-
     val_loss_history = []
     train_loss_history = []
 
     for epoch in range(num_epochs):
-      
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
             if phase == 'train':
@@ -304,67 +304,44 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs, is_incepti
                 model.eval()   # Set model to evaluate mode
 
             running_loss = 0.0
-            running_corrects = 0
 
-            # Iterate over data.
-            for inputs, labels in dataloaders[phase]:
+            # Iterate over data
+            for inputs, targets in dataloaders[phase]:
                 inputs = inputs.to(device)
-                labels = labels.to(device)
-
-                # zero the parameter gradients
+                targets = targets.to(device)
                 optimizer.zero_grad()
-
                 # forward
                 # track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
-                    # Get model outputs and calculate loss
-                    # Special case for inception because in training it has an auxiliary output. In train
-                    #   mode we calculate the loss by summing the final output and the auxiliary output
-                    #   but in testing we only consider the final output.
-                    if is_inception and phase == 'train':
-                        # From https://discuss.pytorch.org/t/how-to-optimize-inception-model-with-auxiliary-classifiers/7958
-                        outputs, aux_outputs = model(inputs)
-                        loss1 = criterion(outputs, labels)
-                        loss2 = criterion(aux_outputs, labels)
-                        loss = loss1 + 0.4*loss2
-                    else:
-                        outputs = model(inputs)
-                        loss = criterion(outputs, labels)
-
-                    # backward + optimize only if in training phase
-                    if phase == 'train':
-                        loss.backward()
-                        optimizer.step()
-                        
-
+                  outputs = model(inputs)
+                  loss = criterion(outputs, targets)
+                  # backward + optimize only if in training phase
+                  if phase == 'train':
+                    loss.backward()
+                    optimizer.step()
                 # statistics
                 running_loss += loss.item() * inputs.size(0)
 
             epoch_loss = running_loss / len(dataloaders[phase].dataset)
             
-            if (epoch % 100) == 0:
-              print('Epoch {}/{}'.format(epoch, num_epochs - 1))
-              print('{} Loss: {:.4f}'.format(phase, epoch_loss))
-
+            if (epoch % 10) == 0:
+                print('Epoch {}/{} {} loss: {:.4f}'.format(epoch, num_epochs - 1, phase, epoch_loss))
             if phase == 'val':
                 val_loss_history.append(epoch_loss)
             if phase == 'train':
                 train_loss_history.append(epoch_loss)
-
-        print()
+            
+            scheduler.step(epoch_loss)
 
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-
-    # load best model weights
-    #model.load_state_dict(best_model_wts)
     return model, train_loss_history, val_loss_history
 
 # put training and validation sets to one dictionary for the use of training function
 dataloaders_dict = {'train' : trainloader, 'val': validloader}
 
 # train model and gather training and validation losses to list
-model_trained, train_loss_history, val_loss_history = train_model(model, dataloaders_dict, criterion, optimizer, num_epochs=500, is_inception=False)
+model_trained, train_loss_history, val_loss_history = train_model(model, dataloaders_dict, criterion, optimizer, num_epochs=50)
 
 # save model
 model_filename = 'cnn_model.pth'
@@ -374,7 +351,7 @@ torch.save(model_trained.state_dict(), model_filename)
 plt.figure(figsize=(10,6))
 plt.plot(np.arange(len(train_loss_history)), train_loss_history, label='train')
 plt.plot(np.arange(len(val_loss_history)), val_loss_history, label='val')
-plt.ylim([0,10])
+plt.ylim([0,2])
 plt.xlabel('Epoch')
 plt.ylabel('Mean Absolute Error Loss')
 plt.title('Loss Over Time')
@@ -388,7 +365,7 @@ print('Model loaded from %s' % model_filename)
 # print weights of second layers convolution
 model_trained.group[0].conv.weight
 
-# function for predicting next 48 hours values based on "n_input" previous time steps using the trained model
+# function for predicting next "output_steps" hours values based on "n_input" previous time steps using the trained model
 def predict(model, input_data, n_input, device):
   # retrieve last observations for input data
   # last observations from input data have not been used in training
@@ -400,7 +377,7 @@ def predict(model, input_data, n_input, device):
   # reshape into [1, channels, n_input]
   inputs = inputs.reshape(1, inputs.shape[1], inputs.shape[0])
   inputs = torch.tensor(inputs, device=device, dtype=torch.float)
-	# forecast the next 48 hours
+  # forecast the next "output_steps" hours
   model.eval()
   model.to(device)
   with torch.no_grad():
@@ -411,7 +388,7 @@ def predict(model, input_data, n_input, device):
     outputs_rescaled = scaler2.inverse_transform(outputs.reshape(outputs.shape[2],outputs.shape[1]))
   return np.squeeze(outputs_rescaled)
 
-# function for splitting test data to non-overlapping batches of 48 hours
+# function for splitting test data to non-overlapping batches of "output_steps" hours
 def split_test_data(data, n_out):
   y = list()
   in_start = 0
@@ -425,13 +402,13 @@ def split_test_data(data, n_out):
       in_start += n_out
   return np.array(y)
 
-# split test data to batches of 48 hours
+# split test data to batches of "output_steps" hours
 test_batches = split_test_data(test, output_steps)
 print(test_batches.shape)
 
 def evaluate_predictions(actual, predicted):
 	scores = list()
-	# calculate mean absolute error (MAE) score for each 48 hour prediction period
+	# calculate mean absolute error (MAE) score for each batch
 	for i in range(actual.shape[0]):
 		# calculate MAE
 		mae = mean_absolute_error(actual[i, :], predicted[i, :])
@@ -442,23 +419,23 @@ def evaluate_predictions(actual, predicted):
 	return mae_average, scores
 
 # evaluate model predictions using walk-forward validation
-# test data is divided to batches of 48 hours and for each batch MAE value is calculated
+# test data is divided to batches of "output_steps" hours and for each batch MAE value is calculated
 def evaluate_model(model, input_data, test_data, n_input, device):
-	# walk-forward validation over each 48 h batch
+	# walk-forward validation over each batch
   predictions = list()
   for i in range(len(test_data)):
-    # predict the 48 hours
+    # predict the "output_steps" hours
     yhat = predict(model, input_data, n_input, device)
     # store the predictions
     predictions.append(yhat)
-    # get real observation from the test data and add to input_data for predicting the next 48 hours
+    # get real observation from the test data and add to input_data for predicting the next "output_step" hours
     input_data = np.concatenate([input_data, test_data[i, :, :]])
-	# evaluate predictions for each 48 hours batch
+	# evaluate predictions for each batch
   predictions = np.array(predictions)
   mae_average, scores = evaluate_predictions(test_data[:,:,0], predictions)
   return mae_average, scores, predictions
 
-# calculate MAE values for the mode predictions
+# calculate MAE values for the model predictions
 mae_average, mae_batches, predictions = evaluate_model(model_trained, train, test_batches, input_steps, device)
 print(mae_average)
 # MAE for the first 10 batches
@@ -507,12 +484,12 @@ plt.savefig('forecast1.png')
 plot_predictions(train, test_batches, predictions, batch_ind=2, train_tail_len=72)
 plt.savefig('forecast2.png')
 
-# make naive forecast by taking last 48 hours as the prediction for next 48 hours and calculate MAE
-def evaluate_naive(input_data, test, n_input):
+# make naive forecast by taking last "output_steps" hours as the prediction for next "output_steps" hours and calculate MAE
+def evaluate_naive(input_data, test, n_output):
   predictions = list()
   for i in range(len(test)):
-    # take last 48 hours from training data
-    value = input_data[-n_input:, 0]
+    # take last "output_steps" hours from training data
+    value = input_data[-n_output:, 0]
     predictions.append(value)
     # get real observation from test data and add to input_data
     input_data = np.concatenate((value, test[i, :, 0]), axis=0).reshape(-1,1)
